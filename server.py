@@ -7,7 +7,8 @@ app = FastAPI()
 
 # Store connected users: {websocket: username}
 clients = {}
-
+# Want to ensure users have unique usernames, so we can also maintain a set of usernames
+users = set()
 # Store messages (in-memory)
 messages = []
 
@@ -23,6 +24,16 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # First message = username
         username = await websocket.receive_text()
+        username = username.strip()
+        if username in users or not username:
+            await websocket.send_text(json.dumps({
+                    "sender": "System",
+                    "content": "Username already taken or is empty. Disconnecting."
+                }))
+            await websocket.close()
+            return
+
+        users.add(username)
         clients[websocket] = username
 
         print(f"{username} connected")
@@ -70,3 +81,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Remove user
         if websocket in clients:
             del clients[websocket]
+            username = clients.get(websocket, None)
+
+        if username and username in users:
+            users.remove(username)
