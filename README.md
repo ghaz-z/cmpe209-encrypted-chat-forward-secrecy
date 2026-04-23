@@ -4,6 +4,8 @@ Currently to run everything and see messages:
 - Start the server: uvicorn server:app --reload
 - Open two terminals and in each terminal: python client.py 
 
+For client.py:
+- /leave will allow the user to disconnect; message will be sent showing the user has disconnected
 NOTE: Right now there's no distinction or "users" - we need to add something to distinguish them; probably for the time being it might be a JSON file that gets wrote to eventually?
 
 ## Steps for Project Completion
