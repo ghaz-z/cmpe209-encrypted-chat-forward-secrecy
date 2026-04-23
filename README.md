@@ -6,7 +6,6 @@ Currently to run everything and see messages:
 
 For client.py:
 - /leave will allow the user to disconnect; message will be sent showing the user has disconnected
-NOTE: Right now there's no distinction or "users" - we need to add something to distinguish them; probably for the time being it might be a JSON file that gets wrote to eventually?
 
 ## Steps for Project Completion
 - 1. Server and client setup (complete)
