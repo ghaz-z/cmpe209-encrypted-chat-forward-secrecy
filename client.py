@@ -7,15 +7,16 @@ import websockets
 import json
 import datetime
 
+# Grabbing the function from server.py to ensure consistent timestamps across client and server
+def get_pst_timestamp():
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    pst = datetime.timezone(datetime.timedelta(hours=-8), name="PST")
+    now = utc_now.astimezone(pst)
+    return now.strftime('%Y-%m-%d %H:%M:%S PST')
+    
 async def send_messages(websocket, username):
 
     loop = asyncio.get_event_loop()
-
-    def get_pst_timestamp():
-        utc_now = datetime.datetime.now(datetime.timezone.utc)
-        pst = datetime.timezone(datetime.timedelta(hours=-8), name="PST")
-        now = utc_now.astimezone(pst)
-        return now.strftime('%Y-%m-%d %H:%M:%S PST')
 
     while True:
         timestamp = get_pst_timestamp()
