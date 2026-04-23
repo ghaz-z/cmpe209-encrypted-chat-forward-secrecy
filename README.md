@@ -8,7 +8,7 @@ NOTE: Right now there's no distinction or "users" - we need to add something to 
 
 ## Steps for Project Completion
 - 1. Server and client setup (complete)
-- 2. Add user identity
+- 2. Add user identity (partially complete! Will add more later to maybe have "permanent" users or even just simulate a login but there are distinguishing differences between users now)
 - 3. Implement encryption of messages (AES-256-GCM)
 - 4. Add key exchange (in our case Diffie-Hellman) for session keys
 - 5. Add forward secrecy (ephemeral session keys to ensure forward secrecy)
