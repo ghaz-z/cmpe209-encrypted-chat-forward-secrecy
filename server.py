@@ -12,6 +12,7 @@ users = set()
 # Store messages (in-memory)
 messages = []
 
+dh_public_keys = {}
 
 def get_pst_timestamp():
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=-8)
@@ -42,8 +43,39 @@ async def websocket_endpoint(websocket: WebSocket):
         for msg in messages:
             await websocket.send_text(json.dumps(msg))
 
+        # Both parties need to have the same session key
+        for other_username, public_key in dh_public_keys.items():
+            if other_username != username:
+                await websocket.send_text(json.dumps({
+                "type": "dh_public",
+                "sender": other_username,
+                "public_key": public_key,
+                "timestamp": get_pst_timestamp()
+                }))
+
         while True:
             data = await websocket.receive_text()
+
+            # try parsing JSON for DH handshake messages
+            try:
+                incoming = json.loads(data)
+            except json.JSONDecodeError:
+                incoming = None
+
+            if isinstance(incoming, dict) and incoming.get("type") == "dh_public":
+                dh_public_keys[username] = incoming["public_key"]
+                relay = {
+                    "type": "dh_public",
+                    "sender": username,
+                    "public_key": incoming["public_key"],
+                    "timestamp": get_pst_timestamp()
+                }
+
+                for client in clients:
+                    if client != websocket:
+                        await client.send_text(json.dumps(relay))
+                continue
+
 
             # Create structured message
             msg_obj = {
