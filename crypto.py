@@ -4,6 +4,7 @@ from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag  # re-exported for callers
+from cryptography.hazmat.primitives import hashes
 
 NONCE_SIZE = 12  # bytes, GCM standard
 KEY_SIZE = 32    # bytes, AES-256
@@ -70,3 +71,18 @@ def _encode(data: bytes) -> str:
 def _decode(s: str) -> bytes:
     padded = s + "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(padded)
+
+def sha256_hex(data: bytes) -> str:
+    """
+    Computing te sha256 digest of the input data
+
+    Returning a hexadecimal string rep of the 256 bit hash
+
+    The hash is used to verify the message integrity (if it's been tampered with) by allowing the receiving user to 
+    recompute the hash and compare it the digest that was sent by the sender.
+
+    While it doesn't provide authentication/confidentiality, it does allow us to detect tampering of the message content.
+    """
+    digest = hashes.Hash(hashes.SHA256())
+    digest.update(data)
+    return digest.finalize().hex()

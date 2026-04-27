@@ -52,6 +52,29 @@ async def websocket_endpoint(websocket: WebSocket):
                 "public_key": public_key,
                 "timestamp": get_pst_timestamp()
                 }))
+        """
+        Main message handling loop for each connected WebSocket client.
+
+        This loop processes three categories of incoming data:
+
+        1. Diffie-Hellman key exchange messages ("dh_public"):
+        - Stores the sender's public key
+        - Broadcasts the key to all other connected clients
+        - Enables peers to independently derive shared session keys
+
+        2. Structured chat messages ("chat"):
+        - Expects JSON input containing message content and a SHA-256 hash
+        - Wraps the message with server-side metadata (sender, timestamp)
+        - Preserves the provided hash for end-to-end integrity verification
+        - Broadcasts the message to all other clients
+
+        3. Fallback (plain text messages):
+        - Handles legacy or non-JSON input
+        - Assigns a null hash value
+        - Still broadcasts the message to maintain compatibility
+
+        All messages are stored in-memory and relayed to other connected clients.
+        """
 
         while True:
             data = await websocket.receive_text()
@@ -76,11 +99,32 @@ async def websocket_endpoint(websocket: WebSocket):
                         await client.send_text(json.dumps(relay))
                 continue
 
+            if isinstance(incoming, dict) and incoming.get("type") == "chat":
+                # Create structured message
+                msg_obj = {
+                    "type": "chat",
+                    "sender": username,
+                    "content": incoming["content"],
+                    "hash": incoming.get("hash"),
+                    "timestamp": get_pst_timestamp()
+                }
 
-            # Create structured message
+                # Store message
+                messages.append(msg_obj)
+
+                print(f"{username}: {incoming['content']}")
+
+                # Broadcast to all other clients
+                for client in clients:
+                    if client != websocket:
+                        await client.send_text(json.dumps(msg_obj))
+                continue
+
             msg_obj = {
+                "type": "chat",
                 "sender": username,
                 "content": data,
+                "hash": None,
                 "timestamp": get_pst_timestamp()
             }
 
@@ -93,6 +137,9 @@ async def websocket_endpoint(websocket: WebSocket):
             for client in clients:
                 if client != websocket:
                     await client.send_text(json.dumps(msg_obj))
+
+
+
 
     except Exception as e:
         username = clients.get(websocket, "Unknown")
