@@ -1,7 +1,7 @@
 import json
-from fastapi import FastAPI, WebSocket
-import json
 import datetime
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 app = FastAPI()
 
@@ -133,22 +133,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             if isinstance(incoming, dict) and incoming.get("type") == "chat":
-                # Create structured message (signature passthrough from client — server does not verify it)
                 msg_obj = {
                     "type": "chat",
                     "sender": username,
-                    "content": incoming["content"],
+                    "ciphertexts": incoming["ciphertexts"],
                     "hash": incoming.get("hash"),
                     "signature": incoming.get("signature"),
-                    "timestamp": get_pst_timestamp()
+                    "timestamp": get_pst_timestamp(),
                 }
 
-                # Store message
                 messages.append(msg_obj)
 
-                print(f"{username}: {incoming['content']}")
+                print(f"{username}: [encrypted message]")
 
-                # Broadcast to all other clients
                 for client in clients:
                     if client != websocket:
                         await client.send_text(json.dumps(msg_obj))
