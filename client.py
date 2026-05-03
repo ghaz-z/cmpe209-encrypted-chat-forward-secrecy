@@ -7,18 +7,35 @@ import base64
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from crypto import sha256_hex
+from crypto import (
+    sha256_hex,
+    chat_signing_bytes,
+    ed25519_generate_private_key,
+    ed25519_public_to_b64,
+    ed25519_public_from_b64,
+    ed25519_sign,
+    ed25519_verify,
+)
 
 # flags for demo (can toggle on (showhashdebug) to show the hash computation one time and then turn off)
 SHOW_HASH_DEBUG = True
 hash_demo_shown = False
 
-
+# after DH exchange store the shared session key, each entry in this associates a username to the appropriate session key
 session_keys = {}
 
+# store each user's Ed25519 signing key,keys will be announces and used for verification
+ed25519_keys = {}
+
 # ephemeral DH public private keypair per client session
+
+# since we're using x25519, it's a better idea to use Ed25519 for signing compared to RSA,
 dh_private_key = x25519.X25519PrivateKey.generate()
 dh_public_key = dh_private_key.public_key()
+
+# create the user's singing keypair, the private key is used to sign any chat messages going out, public key shared with other user of message to verify signature
+ed25519_private_key = ed25519_generate_private_key()
+ed25519_public_key = ed25519_private_key.public_key()
 
 # Grabbing the function from server.py to ensure consistent timestamps across client and server
 def get_pst_timestamp():
@@ -60,6 +77,20 @@ async def announce_dh_key(websocket):
     }
     await websocket.send(json.dumps(payload))
 
+
+async def announce_ed25519_key(websocket):
+    """
+    state the user's public signing key to the server
+    then server adds the username of the user and sends the key to the other user on the chat. 
+
+    only public key is sent, private is kept local and never shared
+    """
+    payload = {
+        "type": "ed25519_public",
+        "public_key": ed25519_public_to_b64(ed25519_public_key),
+    }
+    await websocket.send(json.dumps(payload))
+
 async def send_messages(websocket, username):
     """
     Read user input from the console and send it to the server as JSON.
@@ -68,9 +99,9 @@ async def send_messages(websocket, username):
     - type: tell us the message is a chat payload type
     - content: the actual message content (raw content)
     - hash: sha256 digest of the message content
+    - signature: Ed25519 signature over chat_signing_bytes(username, content)
 
-    Hash is included with the plaintext, it allows users to independently verify the integroty of the message through recomputation
-    This is also useful for our demo purposes
+    Hash supports integrity checks; the signature proves origin (non-repudiation) when peers have the sender's public key.
 
     /leave command closes Websoekcet (existsed in previous version of this code)
     """
@@ -87,10 +118,15 @@ async def send_messages(websocket, username):
             await websocket.close()
             break
 
+  
+        # basically preparing for message to be signed: combines username and message into a single byte string, this is the data that will be signed and also verified
+        to_sign = chat_signing_bytes(username, msg)
+
         payload = {
             "type": "chat",
             "content": msg,
-            "hash": sha256_hex(msg.encode("utf-8"))
+            "hash": sha256_hex(msg.encode("utf-8")),
+            "signature": ed25519_sign(ed25519_private_key, to_sign),
         }
         await websocket.send(json.dumps(payload))
 
@@ -100,24 +136,25 @@ async def receive_messages(websocket, username):
     """
     Continuously get messages from server
 
-    This function handles two types of incoming messages:
+    This function handles several kinds of incoming messages:
 
     1. Diffie-Hellman key exchange ("dh_public"):
        - Receives a peer's public key
        - Derives a shared session key 
        - Stores the resulting session key per peer
 
-    2. Chat messages ("chat"):
-       - Extracts the message content and accompanying SHA-256 hash
-       - Recomputes the hash over the received content
-       - Compares the computed hash with the transmitted hash to verify integrity
+    2. Ed25519 public key ("ed25519_public"):
+       - Receives a peer's signing public key
+       - Stores it so we can verify signatures on chat from that peer
 
-    If hashes do not match then message is rejected and there will be a warning displayed
+    3. Chat messages ("chat"):
+       - Extracts content, SHA-256 hash, and optional Ed25519 signature
+       - Verifies hash and (when present) signature using the sender's registered public key
+
+    If hashes or signatures fail verification the message rejected w a warning
 
     The debug flag allows us during the demo to show the hashing process in action
     We can turn it off to avoid clutter by turning to false as listed in the comment on top of it
-
-    Successful messages have a "hash verified" message printed 
     """
     global hash_demo_shown
 
@@ -142,16 +179,47 @@ async def receive_messages(websocket, username):
                 print(f"{username}: ", end="", flush=True)
                 continue
 
-            # handle hashed chat messages
+            # first checks if the data is a public key, then checks who is sending the key
+            # needs to make sure that server doesn't send you your own public key (this is the continue part in line 191), then you convert from base64 str to Ed25519PublicKey and store it
+            # then messge prints to say that the key has been registered for the user
+            if data.get("type") == "ed25519_public":
+                peer = data["sender"]
+                if peer == username:
+                    continue
+                ed25519_keys[peer] = ed25519_public_from_b64(data["public_key"])
+                print(f"\n[Sig] Verification key registered for {peer}")
+                print(f"{username}: ", end="", flush=True)
+                continue
+
+            # handle hashed chat messages (and optional Ed25519 signature)
             if data.get("type") == "chat":
                 received_content = data["content"]
                 received_hash = data["hash"]
+                sender = data["sender"]
 
                 computed_hash = sha256_hex(received_content.encode("utf-8"))
 
                 if computed_hash != received_hash:
-                    print(f"\n⚠️ Integrity check failed for message from {data['sender']}\n{username}: ", end="", flush=True)
+                    print(f"\n⚠️ Integrity check failed for message from {sender}\n{username}: ", end="", flush=True)
                     continue
+
+                # Verify the Ed25519 digital signature (if one is present).
+                # sig_ok tracks the result:
+                #   None  → no signature provided
+                #   True  → signature verified successfully
+                #   False → signature verification failed
+                sig_ok = None
+                sig_b64 = data.get("signature")
+                if sig_b64:
+                    pk = ed25519_keys.get(sender)
+                    if pk is None:
+                        print(f"\n⚠️ No Ed25519 public key yet for {sender}; cannot verify signature\n{username}: ", end="", flush=True)
+                        continue
+                    payload_bytes = chat_signing_bytes(sender, received_content)
+                    sig_ok = ed25519_verify(pk, payload_bytes, sig_b64)
+                    if not sig_ok:
+                        print(f"\n⚠️ Signature verification failed for message from {sender}\n{username}: ", end="", flush=True)
+                        continue
 
                 # Debug mode: show full hashing details ONCE
                 if SHOW_HASH_DEBUG and not hash_demo_shown:
@@ -163,7 +231,7 @@ async def receive_messages(websocket, username):
 
                     hash_demo_shown = True
 
-                print(f"\n📩 [{data['timestamp']}] {data['sender']}: {received_content} [hash verified]\n{username}: ", end="", flush=True)
+                print(f"\n📩 [{data['timestamp']}] {sender}: {received_content}\n{username}: ", end="", flush=True)
                 continue
 
     except websockets.exceptions.ConnectionClosed:
@@ -188,6 +256,8 @@ async def main():
 
             # announce ephemeral DH public key for session
             await announce_dh_key(websocket)
+            # announce Ed25519 public key so peers can verify our chat signatures
+            await announce_ed25519_key(websocket)
 
             await asyncio.gather(
                 send_messages(websocket, username),
