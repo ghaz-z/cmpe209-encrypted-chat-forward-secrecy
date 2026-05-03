@@ -1,7 +1,7 @@
 import json
-from fastapi import FastAPI, WebSocket
-import json
 import datetime
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 app = FastAPI()
 
@@ -76,6 +76,23 @@ async def websocket_endpoint(websocket: WebSocket):
                         await client.send_text(json.dumps(relay))
                 continue
 
+            if isinstance(incoming, dict) and incoming.get("type") == "encrypted_chat":
+                msg_obj = {
+                    "type": "encrypted_chat",
+                    "sender": username,
+                    "ciphertexts": incoming.get("ciphertexts", {}),
+                    "timestamp": get_pst_timestamp(),
+                }
+
+                messages.append(msg_obj)
+
+                print(f"{username}: [encrypted message]")
+
+                for client in clients:
+                    if client != websocket:
+                        await client.send_text(json.dumps(msg_obj))
+                continue
+
 
             # Create structured message
             msg_obj = {
@@ -112,8 +129,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # Remove user
         if websocket in clients:
+            username = clients[websocket]
             del clients[websocket]
-            username = clients.get(websocket, None)
 
         if username and username in users:
             users.remove(username)
+
+        if username in dh_public_keys:
+            del dh_public_keys[username]

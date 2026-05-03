@@ -1,12 +1,15 @@
 import asyncio
-import websockets
-import json
-import datetime
 import base64
+import datetime
+import json
+
+import websockets
 
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.exceptions import InvalidTag
+from crypto import decrypt, encrypt
 
 session_keys = {}
 
@@ -34,7 +37,7 @@ def b64_to_public_key(data):
     raw = base64.b64decode(data.encode("utf-8"))
     return x25519.X25519PublicKey.from_public_bytes(raw)
 
-def derive_session_key(my_private_key, peer_public_key, peer_username):
+def derive_session_key(my_private_key, peer_public_key):
     shared_secret = my_private_key.exchange(peer_public_key)
 
     # HMAC-based Key Derivation Function
@@ -45,7 +48,28 @@ def derive_session_key(my_private_key, peer_public_key, peer_username):
         info=f"chat-session".encode("utf-8"),
     ).derive(shared_secret)
 
-    return base64.b64encode(derived).decode("utf-8")
+    return derived
+
+def build_encrypted_message(sender, plaintext, peer_session_keys):
+    if not peer_session_keys:
+        raise ValueError("No session keys established")
+
+    aad = sender.encode("utf-8")
+    ciphertexts = {
+        peer: encrypt(plaintext, key, aad=aad)
+        for peer, key in peer_session_keys.items()
+    }
+    return {
+        "type": "encrypted_chat",
+        "sender": sender,
+        "ciphertexts": ciphertexts,
+    }
+
+def decrypt_incoming_message(message, recipient, peer_session_keys):
+    sender = message["sender"]
+    key = peer_session_keys[sender]
+    ciphertext = message["ciphertexts"][recipient]
+    return decrypt(ciphertext, key, aad=sender.encode("utf-8"))
 
 async def announce_dh_key(websocket):
     payload = {
@@ -68,7 +92,13 @@ async def send_messages(websocket, username):
             await websocket.close()
             break
 
-        await websocket.send(msg)
+        try:
+            payload = build_encrypted_message(username, msg, session_keys)
+        except ValueError:
+            print("⚠️ No session keys established yet. Wait for another client to complete key exchange.")
+            continue
+
+        await websocket.send(json.dumps(payload))
 
 async def receive_messages(websocket, username):
     try:
@@ -84,12 +114,33 @@ async def receive_messages(websocket, username):
                     continue
 
                 peer_public_key = b64_to_public_key(data["public_key"])
-                session_key = derive_session_key(dh_private_key, peer_public_key, peer)
+                session_key = derive_session_key(dh_private_key, peer_public_key)
                 session_keys[peer] = session_key
 
                 print(f"\n[DH] Session key established with {peer}")
-                print(f"[DH] Derived key for {peer}: {session_key}")
                 print(f"{username}: ", end="", flush=True)
+                continue
+
+            if data.get("type") == "encrypted_chat":
+                if username not in data.get("ciphertexts", {}):
+                    continue
+
+                try:
+                    plaintext = decrypt_incoming_message(data, username, session_keys)
+                except KeyError:
+                    print("\n⚠️ Missing session key for encrypted message.")
+                    print(f"{username}: ", end="", flush=True)
+                    continue
+                except (InvalidTag, ValueError):
+                    print("\n⚠️ Failed to authenticate encrypted message.")
+                    print(f"{username}: ", end="", flush=True)
+                    continue
+
+                print(
+                    f"\n📩 [{data['timestamp']}] {data['sender']}: {plaintext}\n{username}: ",
+                    end="",
+                    flush=True,
+                )
                 continue
 
 
@@ -123,4 +174,5 @@ async def main():
     except Exception as e:
         print("❌ Connection error:", e)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
