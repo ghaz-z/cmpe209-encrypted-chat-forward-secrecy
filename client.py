@@ -188,6 +188,9 @@ async def receive_messages(websocket, username):
     """
     global hash_demo_shown
 
+
+    # Track displayed messages to avoid duplicates
+    displayed = set()
     try:
         while True:
             msg = await websocket.recv()
@@ -196,14 +199,11 @@ async def receive_messages(websocket, username):
             # handle DH public key messages
             if data.get("type") == "dh_public":
                 peer = data["sender"]
-
                 if peer == username:
                     continue
-
                 peer_public_key = b64_to_public_key(data["public_key"])
                 session_key = derive_session_key(dh_private_key, peer_public_key)
                 session_keys[peer] = session_key
-
                 print(f"\n[DH] Session key established with {peer}")
                 print(f"{username}: ", end="", flush=True)
                 continue
@@ -222,7 +222,9 @@ async def receive_messages(websocket, username):
             if data.get("type") == "encrypted_chat":
                 if username not in data.get("ciphertexts", {}):
                     continue
-
+                key = (data["sender"], data.get("timestamp"))
+                if key in displayed:
+                    continue
                 try:
                     plaintext = decrypt_incoming_message(data, username, session_keys)
                 except KeyError:
@@ -233,12 +235,12 @@ async def receive_messages(websocket, username):
                     print("\n⚠️ Failed to authenticate encrypted message.")
                     print(f"{username}: ", end="", flush=True)
                     continue
-
                 print(
                     f"\n📩 [{data['timestamp']}] {data['sender']}: {plaintext}\n{username}: ",
                     end="",
                     flush=True,
                 )
+                displayed.add(key)
                 continue
 
             # handle hashed chat messages (and optional Ed25519 signature)
@@ -246,18 +248,13 @@ async def receive_messages(websocket, username):
                 received_content = data["content"]
                 received_hash = data["hash"]
                 sender = data["sender"]
-
+                key = (sender, data.get("timestamp"))
+                if key in displayed:
+                    continue
                 computed_hash = sha256_hex(received_content.encode("utf-8"))
-
                 if computed_hash != received_hash:
                     print(f"\n⚠️ Integrity check failed for message from {sender}\n{username}: ", end="", flush=True)
                     continue
-
-                # Verify the Ed25519 digital signature (if one is present).
-                # sig_ok tracks the result:
-                #   None  → no signature provided
-                #   True  → signature verified successfully
-                #   False → signature verification failed
                 sig_ok = None
                 sig_b64 = data.get("signature")
                 if sig_b64:
@@ -270,18 +267,15 @@ async def receive_messages(websocket, username):
                     if not sig_ok:
                         print(f"\n⚠️ Signature verification failed for message from {sender}\n{username}: ", end="", flush=True)
                         continue
-
-                # Debug mode: show full hashing details ONCE
                 if SHOW_HASH_DEBUG and not hash_demo_shown:
                     print("\n🔍 HASH DEBUG MODE")
                     print(f"Message:        {received_content}")
                     print(f"Sent hash:      {received_hash}")
                     print(f"Computed hash:  {computed_hash}")
                     print("✅ Hashes match → integrity verified\n")
-
                     hash_demo_shown = True
-
                 print(f"\n📩 [{data['timestamp']}] {sender}: {received_content}\n{username}: ", end="", flush=True)
+                displayed.add(key)
                 continue
 
     except websockets.exceptions.ConnectionClosed:
