@@ -1,12 +1,14 @@
 import asyncio
-import websockets
-import json
-import datetime
 import base64
+import datetime
+import json
+
+import websockets
 
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.exceptions import InvalidTag
 from crypto import (
     sha256_hex,
     chat_signing_bytes,
@@ -15,6 +17,8 @@ from crypto import (
     ed25519_public_from_b64,
     ed25519_sign,
     ed25519_verify,
+    decrypt,
+    encrypt,
 )
 
 # flags for demo (can toggle on (showhashdebug) to show the hash computation one time and then turn off)
@@ -57,7 +61,7 @@ def b64_to_public_key(data):
     raw = base64.b64decode(data.encode("utf-8"))
     return x25519.X25519PublicKey.from_public_bytes(raw)
 
-def derive_session_key(my_private_key, peer_public_key, peer_username):
+def derive_session_key(my_private_key, peer_public_key):
     shared_secret = my_private_key.exchange(peer_public_key)
 
     # HMAC-based Key Derivation Function
@@ -68,7 +72,28 @@ def derive_session_key(my_private_key, peer_public_key, peer_username):
         info=f"chat-session".encode("utf-8"),
     ).derive(shared_secret)
 
-    return base64.b64encode(derived).decode("utf-8")
+    return derived
+
+def build_encrypted_message(sender, plaintext, peer_session_keys):
+    if not peer_session_keys:
+        raise ValueError("No session keys established")
+
+    aad = sender.encode("utf-8")
+    ciphertexts = {
+        peer: encrypt(plaintext, key, aad=aad)
+        for peer, key in peer_session_keys.items()
+    }
+    return {
+        "type": "encrypted_chat",
+        "sender": sender,
+        "ciphertexts": ciphertexts,
+    }
+
+def decrypt_incoming_message(message, recipient, peer_session_keys):
+    sender = message["sender"]
+    key = peer_session_keys[sender]
+    ciphertext = message["ciphertexts"][recipient]
+    return decrypt(ciphertext, key, aad=sender.encode("utf-8"))
 
 async def announce_dh_key(websocket):
     payload = {
@@ -118,19 +143,24 @@ async def send_messages(websocket, username):
             await websocket.close()
             break
 
-  
-        # basically preparing for message to be signed: combines username and message into a single byte string, this is the data that will be signed and also verified
+        # Send both encrypted and signed/hashed message
+        # Signed/hashed message
         to_sign = chat_signing_bytes(username, msg)
-
-        payload = {
+        signed_payload = {
             "type": "chat",
             "content": msg,
             "hash": sha256_hex(msg.encode("utf-8")),
             "signature": ed25519_sign(ed25519_private_key, to_sign),
         }
-        await websocket.send(json.dumps(payload))
+        await websocket.send(json.dumps(signed_payload))
 
-
+        # Encrypted message (if session keys exist)
+        if session_keys:
+            try:
+                encrypted_payload = build_encrypted_message(username, msg, session_keys)
+                await websocket.send(json.dumps(encrypted_payload))
+            except ValueError:
+                pass
 
 async def receive_messages(websocket, username):
     """
@@ -171,17 +201,14 @@ async def receive_messages(websocket, username):
                     continue
 
                 peer_public_key = b64_to_public_key(data["public_key"])
-                session_key = derive_session_key(dh_private_key, peer_public_key, peer)
+                session_key = derive_session_key(dh_private_key, peer_public_key)
                 session_keys[peer] = session_key
 
                 print(f"\n[DH] Session key established with {peer}")
-                print(f"[DH] Derived key for {peer}: {session_key}")
                 print(f"{username}: ", end="", flush=True)
                 continue
 
-            # first checks if the data is a public key, then checks who is sending the key
-            # needs to make sure that server doesn't send you your own public key (this is the continue part in line 191), then you convert from base64 str to Ed25519PublicKey and store it
-            # then messge prints to say that the key has been registered for the user
+            # handle Ed25519 public key messages
             if data.get("type") == "ed25519_public":
                 peer = data["sender"]
                 if peer == username:
@@ -189,6 +216,29 @@ async def receive_messages(websocket, username):
                 ed25519_keys[peer] = ed25519_public_from_b64(data["public_key"])
                 print(f"\n[Sig] Verification key registered for {peer}")
                 print(f"{username}: ", end="", flush=True)
+                continue
+
+            # handle encrypted chat messages
+            if data.get("type") == "encrypted_chat":
+                if username not in data.get("ciphertexts", {}):
+                    continue
+
+                try:
+                    plaintext = decrypt_incoming_message(data, username, session_keys)
+                except KeyError:
+                    print("\n⚠️ Missing session key for encrypted message.")
+                    print(f"{username}: ", end="", flush=True)
+                    continue
+                except (InvalidTag, ValueError):
+                    print("\n⚠️ Failed to authenticate encrypted message.")
+                    print(f"{username}: ", end="", flush=True)
+                    continue
+
+                print(
+                    f"\n📩 [{data['timestamp']}] {data['sender']}: {plaintext}\n{username}: ",
+                    end="",
+                    flush=True,
+                )
                 continue
 
             # handle hashed chat messages (and optional Ed25519 signature)
@@ -267,4 +317,5 @@ async def main():
     except Exception as e:
         print("❌ Connection error:", e)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

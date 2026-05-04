@@ -1,7 +1,7 @@
 import json
-from fastapi import FastAPI, WebSocket
-import json
 import datetime
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 app = FastAPI()
 
@@ -94,6 +94,7 @@ async def websocket_endpoint(websocket: WebSocket):
         """
 
         while True:
+
             data = await websocket.receive_text()
 
             # try parsing JSON for DH handshake messages
@@ -102,6 +103,7 @@ async def websocket_endpoint(websocket: WebSocket):
             except json.JSONDecodeError:
                 incoming = None
 
+            # DH public key exchange
             if isinstance(incoming, dict) and incoming.get("type") == "dh_public":
                 dh_public_keys[username] = incoming["public_key"]
                 relay = {
@@ -110,14 +112,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     "public_key": incoming["public_key"],
                     "timestamp": get_pst_timestamp()
                 }
-
                 for client in clients:
                     if client != websocket:
                         await client.send_text(json.dumps(relay))
                 continue
 
-            # this is process of server sending the user's public key to the other user on the chat (does not store the key, just sends it to the other user)
-            # after connecting user send's its public key which gets stores with their username and sent to the other user in the chat
+            # Ed25519 signing public key exchange
             if isinstance(incoming, dict) and incoming.get("type") == "ed25519_public":
                 ed25519_public_keys[username] = incoming["public_key"]
                 relay = {
@@ -126,14 +126,28 @@ async def websocket_endpoint(websocket: WebSocket):
                     "public_key": incoming["public_key"],
                     "timestamp": get_pst_timestamp(),
                 }
-                # state public key to the other clients in the chat while making sure ot to send a user their own key
                 for client in clients:
                     if client != websocket:
                         await client.send_text(json.dumps(relay))
                 continue
 
+            # Encrypted chat message
+            if isinstance(incoming, dict) and incoming.get("type") == "encrypted_chat":
+                msg_obj = {
+                    "type": "encrypted_chat",
+                    "sender": username,
+                    "ciphertexts": incoming.get("ciphertexts", {}),
+                    "timestamp": get_pst_timestamp(),
+                }
+                messages.append(msg_obj)
+                print(f"{username}: [encrypted message]")
+                for client in clients:
+                    if client != websocket:
+                        await client.send_text(json.dumps(msg_obj))
+                continue
+
+            # Signed/hashed chat message
             if isinstance(incoming, dict) and incoming.get("type") == "chat":
-                # Create structured message (signature passthrough from client — server does not verify it)
                 msg_obj = {
                     "type": "chat",
                     "sender": username,
@@ -142,18 +156,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     "signature": incoming.get("signature"),
                     "timestamp": get_pst_timestamp()
                 }
-
-                # Store message
                 messages.append(msg_obj)
-
                 print(f"{username}: {incoming['content']}")
-
-                # Broadcast to all other clients
                 for client in clients:
                     if client != websocket:
                         await client.send_text(json.dumps(msg_obj))
                 continue
 
+            # Fallback: plain text message
             msg_obj = {
                 "type": "chat",
                 "sender": username,
@@ -161,13 +171,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 "hash": None,
                 "timestamp": get_pst_timestamp()
             }
-
-            # Store message
             messages.append(msg_obj)
-
             print(f"{username}: {data}")
-
-            # Broadcast to all other clients
             for client in clients:
                 if client != websocket:
                     await client.send_text(json.dumps(msg_obj))
