@@ -1,25 +1,24 @@
 import asyncio
-import base64
-import datetime
-import json
-
 import websockets
+import json
+import datetime
+import base64
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.exceptions import InvalidTag
 
 from crypto import (
-    chat_signing_bytes,
     decrypt,
-    ed25519_generate_private_key,
-    ed25519_public_from_b64,
-    ed25519_public_to_b64,
-    ed25519_sign,
-    ed25519_verify,
     encrypt,
     sha256_hex,
+    chat_signing_bytes,
+    ed25519_generate_private_key,
+    ed25519_public_to_b64,
+    ed25519_public_from_b64,
+    ed25519_sign,
+    ed25519_verify,
 )
 
 # flags for demo (can toggle on (showhashdebug) to show the hash computation one time and then turn off)
@@ -46,13 +45,13 @@ def get_pst_timestamp():
     utc_now = datetime.datetime.now(datetime.timezone.utc)
     pst = datetime.timezone(datetime.timedelta(hours=-8), name="PST")
     now = utc_now.astimezone(pst)
-    return now.strftime("%Y-%m-%d %H:%M:%S PST")
+    return now.strftime('%Y-%m-%d %H:%M:%S PST')
 
 
 def public_key_to_b64(public_key):
     raw = public_key.public_bytes(
         encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
+        format=serialization.PublicFormat.Raw
     )
     return base64.b64encode(raw).decode("utf-8")
 
@@ -68,7 +67,7 @@ def derive_session_key(my_private_key, peer_public_key):
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=b"chat-session",
+        info=f"chat-session".encode("utf-8"),
     ).derive(shared_secret)
     return derived
 
@@ -104,7 +103,7 @@ def decrypt_incoming_message(message, recipient, peer_session_keys):
 async def announce_dh_key(websocket):
     payload = {
         "type": "dh_public",
-        "public_key": public_key_to_b64(dh_public_key),
+        "public_key": public_key_to_b64(dh_public_key)
     }
     await websocket.send(json.dumps(payload))
 

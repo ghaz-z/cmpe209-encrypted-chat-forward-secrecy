@@ -7,15 +7,20 @@ app = FastAPI()
 
 # Store connected users: {websocket: username}
 clients = {}
+# Want to ensure users have unique usernames, so we can also maintain a set of usernames
 users = set()
+# Store messages (in-memory)
 messages = []
+
 dh_public_keys = {}
+
+# store each users ed25519 publi c key as base64 string
 ed25519_public_keys = {}
 
 
 def get_pst_timestamp():
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=-8)
-    return now.strftime("%Y-%m-%d %H:%M:%S PST")
+    return now.strftime('%Y-%m-%d %H:%M:%S PST')
 
 
 @app.websocket("/ws")
@@ -27,9 +32,9 @@ async def websocket_endpoint(websocket: WebSocket):
         username = username.strip()
         if username in users or not username:
             await websocket.send_text(json.dumps({
-                "sender": "System",
-                "content": "Username already taken or is empty. Disconnecting."
-            }))
+                    "sender": "System",
+                    "content": "Username already taken or is empty. Disconnecting."
+                }))
             await websocket.close()
             return
 

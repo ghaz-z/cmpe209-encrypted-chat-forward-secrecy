@@ -14,7 +14,7 @@ def test_build_encrypted_message_encrypts_for_each_recipient():
         {"maya": maya_key, "zane": zane_key},
     )
 
-    assert message["type"] == "encrypted_chat"
+    assert message["type"] == "chat"
     assert set(message["ciphertexts"]) == {"maya", "zane"}
     assert decrypt_incoming_message(message, "maya", {"skye": maya_key}) == "xin chao moi nguoi"
     assert decrypt_incoming_message(message, "zane", {"skye": zane_key}) == "xin chao moi nguoi"
