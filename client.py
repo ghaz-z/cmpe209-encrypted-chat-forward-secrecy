@@ -25,6 +25,12 @@ from crypto import (
 SHOW_HASH_DEBUG = True
 hash_demo_shown = False
 
+# used for demo purposes to show the hash and signature verification
+SHOW_DEMO_OUTPUT = True
+# for demo purposes will print an additional lines for: DH derived key and Ed25519 public key + fingerprint + hash verified and sig verified lines
+demo_verify_shown = False
+# if false means demos over and wont print those extra lines of code
+
 # after DH exchange store the shared session key, each entry in this associates a username to the appropriate session key
 session_keys = {}
 
@@ -182,7 +188,7 @@ async def receive_messages(websocket, username):
     The debug flag allows us during the demo to show the hashing process in action
     We can turn it off to avoid clutter by turning to false as listed in the comment on top of it
     """
-    global hash_demo_shown
+    global hash_demo_shown, demo_verify_shown
 
     try:
         while True:
@@ -201,6 +207,9 @@ async def receive_messages(websocket, username):
                 session_keys[peer] = session_key
 
                 print(f"\n[DH] Session key established with {peer}")
+                if SHOW_DEMO_OUTPUT:
+                    # Compare this hex on both clients: it should match for the same pair of users.
+                    print(f"[DH] Derived AES-256 session key with {peer} (hex): {session_key.hex()}")
                 print(f"{username}: ", end="", flush=True)
                 continue
 
@@ -213,6 +222,16 @@ async def receive_messages(websocket, username):
                     continue
                 ed25519_keys[peer] = ed25519_public_from_b64(data["public_key"])
                 print(f"\n[Sig] Verification key registered for {peer}")
+                if SHOW_DEMO_OUTPUT:
+                    # Show the other user's Ed25519 public key (what we use to verify their signatures).
+                    print(f"[Sig] {peer}'s Ed25519 public key (base64): {data['public_key']}")
+                    raw = ed25519_keys[peer].public_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PublicFormat.Raw,
+                    )
+                    print(
+                        f"[Sig] Fingerprint SHA256(raw Ed25519 pubkey): {sha256_hex(raw)[:32]}…"
+                    )
                 print(f"{username}: ", end="", flush=True)
                 continue
 
@@ -243,6 +262,12 @@ async def receive_messages(websocket, username):
                 if not ed25519_verify(pk, payload_bytes, sig_b64):
                     print(f"\n⚠️ Signature verification failed for encrypted message from {sender}\n{username}: ", end="", flush=True)
                     continue
+
+                if SHOW_DEMO_OUTPUT and not demo_verify_shown:
+                    print("\n✅ Hash verified + signature verified (first encrypted message received)")
+                    print("   - Hash matches recomputed SHA-256 over ciphertext bundle")
+                    print(f"   - Signature verifies using {sender}'s Ed25519 public key")
+                    demo_verify_shown = True
 
                 try:
                     plaintext = decrypt_incoming_message(data, username, session_keys)
@@ -286,6 +311,11 @@ async def main():
             await announce_dh_key(websocket)
             # announce Ed25519 public key so peers can verify our chat signatures
             await announce_ed25519_key(websocket)
+            if SHOW_DEMO_OUTPUT:
+                print(
+                    f"[Sig] Our Ed25519 public key (others verify our signatures with this): "
+                    f"{ed25519_public_to_b64(ed25519_public_key)}"
+                )
 
             await asyncio.gather(
                 send_messages(websocket, username),
