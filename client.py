@@ -1,13 +1,17 @@
 import asyncio
-import websockets
-import json
-import datetime
 import base64
+import datetime
+import json
+
+import websockets
 
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.exceptions import InvalidTag
 from crypto import (
+    decrypt,
+    encrypt,
     sha256_hex,
     chat_signing_bytes,
     ed25519_generate_private_key,
@@ -57,7 +61,7 @@ def b64_to_public_key(data):
     raw = base64.b64decode(data.encode("utf-8"))
     return x25519.X25519PublicKey.from_public_bytes(raw)
 
-def derive_session_key(my_private_key, peer_public_key, peer_username):
+def derive_session_key(my_private_key, peer_public_key):
     shared_secret = my_private_key.exchange(peer_public_key)
 
     # HMAC-based Key Derivation Function
@@ -68,7 +72,35 @@ def derive_session_key(my_private_key, peer_public_key, peer_username):
         info=f"chat-session".encode("utf-8"),
     ).derive(shared_secret)
 
-    return base64.b64encode(derived).decode("utf-8")
+    return derived
+
+def serialize_ciphertexts(ciphertexts):
+    return json.dumps(ciphertexts, sort_keys=True, separators=(",", ":"))
+
+def build_encrypted_message(sender, plaintext, peer_session_keys):
+    if not peer_session_keys:
+        raise ValueError("No session keys established")
+
+    aad = sender.encode("utf-8")
+    ciphertexts = {
+        peer: encrypt(plaintext, key, aad=aad)
+        for peer, key in peer_session_keys.items()
+    }
+    serialized_ciphertexts = serialize_ciphertexts(ciphertexts)
+    to_sign = chat_signing_bytes(sender, serialized_ciphertexts)
+    return {
+        "type": "chat",
+        "sender": sender,
+        "ciphertexts": ciphertexts,
+        "hash": sha256_hex(serialized_ciphertexts.encode("utf-8")),
+        "signature": ed25519_sign(ed25519_private_key, to_sign),
+    }
+
+def decrypt_incoming_message(message, recipient, peer_session_keys):
+    sender = message["sender"]
+    key = peer_session_keys[sender]
+    ciphertext = message["ciphertexts"][recipient]
+    return decrypt(ciphertext, key, aad=sender.encode("utf-8"))
 
 async def announce_dh_key(websocket):
     payload = {
@@ -118,19 +150,13 @@ async def send_messages(websocket, username):
             await websocket.close()
             break
 
-  
-        # basically preparing for message to be signed: combines username and message into a single byte string, this is the data that will be signed and also verified
-        to_sign = chat_signing_bytes(username, msg)
+        try:
+            payload = build_encrypted_message(username, msg, session_keys)
+        except ValueError:
+            print("⚠️ No session keys established yet. Wait for another client to complete key exchange.")
+            continue
 
-        payload = {
-            "type": "chat",
-            "content": msg,
-            "hash": sha256_hex(msg.encode("utf-8")),
-            "signature": ed25519_sign(ed25519_private_key, to_sign),
-        }
         await websocket.send(json.dumps(payload))
-
-
 
 async def receive_messages(websocket, username):
     """
@@ -171,11 +197,10 @@ async def receive_messages(websocket, username):
                     continue
 
                 peer_public_key = b64_to_public_key(data["public_key"])
-                session_key = derive_session_key(dh_private_key, peer_public_key, peer)
+                session_key = derive_session_key(dh_private_key, peer_public_key)
                 session_keys[peer] = session_key
 
                 print(f"\n[DH] Session key established with {peer}")
-                print(f"[DH] Derived key for {peer}: {session_key}")
                 print(f"{username}: ", end="", flush=True)
                 continue
 
@@ -191,47 +216,50 @@ async def receive_messages(websocket, username):
                 print(f"{username}: ", end="", flush=True)
                 continue
 
-            # handle hashed chat messages (and optional Ed25519 signature)
             if data.get("type") == "chat":
-                received_content = data["content"]
-                received_hash = data["hash"]
                 sender = data["sender"]
-
-                computed_hash = sha256_hex(received_content.encode("utf-8"))
-
-                if computed_hash != received_hash:
-                    print(f"\n⚠️ Integrity check failed for message from {sender}\n{username}: ", end="", flush=True)
+                if username not in data["ciphertexts"]:
                     continue
 
-                # Verify the Ed25519 digital signature (if one is present).
-                # sig_ok tracks the result:
-                #   None  → no signature provided
-                #   True  → signature verified successfully
-                #   False → signature verification failed
-                sig_ok = None
+                serialized_ciphertexts = serialize_ciphertexts(data["ciphertexts"])
+                received_hash = data.get("hash")
+                computed_hash = sha256_hex(serialized_ciphertexts.encode("utf-8"))
+
+                if computed_hash != received_hash:
+                    print(f"\n⚠️ Integrity check failed for encrypted message from {sender}\n{username}: ", end="", flush=True)
+                    continue
+
                 sig_b64 = data.get("signature")
-                if sig_b64:
-                    pk = ed25519_keys.get(sender)
-                    if pk is None:
-                        print(f"\n⚠️ No Ed25519 public key yet for {sender}; cannot verify signature\n{username}: ", end="", flush=True)
-                        continue
-                    payload_bytes = chat_signing_bytes(sender, received_content)
-                    sig_ok = ed25519_verify(pk, payload_bytes, sig_b64)
-                    if not sig_ok:
-                        print(f"\n⚠️ Signature verification failed for message from {sender}\n{username}: ", end="", flush=True)
-                        continue
+                if not sig_b64:
+                    print(f"\n⚠️ Missing signature for encrypted message from {sender}\n{username}: ", end="", flush=True)
+                    continue
 
-                # Debug mode: show full hashing details ONCE
-                if SHOW_HASH_DEBUG and not hash_demo_shown:
-                    print("\n🔍 HASH DEBUG MODE")
-                    print(f"Message:        {received_content}")
-                    print(f"Sent hash:      {received_hash}")
-                    print(f"Computed hash:  {computed_hash}")
-                    print("✅ Hashes match → integrity verified\n")
+                pk = ed25519_keys.get(sender)
+                if pk is None:
+                    print(f"\n⚠️ No Ed25519 public key yet for {sender}; cannot verify signature\n{username}: ", end="", flush=True)
+                    continue
 
-                    hash_demo_shown = True
+                payload_bytes = chat_signing_bytes(sender, serialized_ciphertexts)
+                if not ed25519_verify(pk, payload_bytes, sig_b64):
+                    print(f"\n⚠️ Signature verification failed for encrypted message from {sender}\n{username}: ", end="", flush=True)
+                    continue
 
-                print(f"\n📩 [{data['timestamp']}] {sender}: {received_content}\n{username}: ", end="", flush=True)
+                try:
+                    plaintext = decrypt_incoming_message(data, username, session_keys)
+                except KeyError:
+                    print("\n⚠️ Missing session key for encrypted message.")
+                    print(f"{username}: ", end="", flush=True)
+                    continue
+                except (InvalidTag, ValueError):
+                    print("\n⚠️ Failed to authenticate encrypted message.")
+                    print(f"{username}: ", end="", flush=True)
+                    continue
+
+                print(
+                    f"\n📩 [{data['timestamp']}] {data['sender']}: {plaintext}\n{username}: ",
+                    end="",
+                    flush=True,
+                )
                 continue
 
     except websockets.exceptions.ConnectionClosed:
@@ -267,4 +295,5 @@ async def main():
     except Exception as e:
         print("❌ Connection error:", e)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
