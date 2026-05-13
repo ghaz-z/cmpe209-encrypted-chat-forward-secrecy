@@ -31,11 +31,14 @@ SHOW_DEMO_OUTPUT = True
 demo_verify_shown = False
 # if false means demos over and wont print those extra lines of code
 
-# after DH exchange store the shared session key, each entry in this associates a username to the appropriate session key
+# after DH exchange store the shared secret, each entry in this associates a username to the shared secret (not per-message key)
 session_keys = {}
 
 # store each user's Ed25519 signing key,keys will be announces and used for verification
 ed25519_keys = {}
+
+# message counter per peer for key ratcheting
+message_counters = {}
 
 # ephemeral DH public private keypair per client session
 
@@ -67,44 +70,54 @@ def b64_to_public_key(data):
     raw = base64.b64decode(data.encode("utf-8"))
     return x25519.X25519PublicKey.from_public_bytes(raw)
 
-def derive_session_key(my_private_key, peer_public_key):
+def derive_shared_secret(my_private_key, peer_public_key):
     shared_secret = my_private_key.exchange(peer_public_key)
 
-    # HMAC-based Key Derivation Function
+    return shared_secret
+
+def derive_message_key(shared_secret, counter):
+    # Derive a per-message key using HKDF with counter
     derived = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=f"chat-session".encode("utf-8"),
+        info=f"chat-message-{counter}".encode("utf-8"),
     ).derive(shared_secret)
-
     return derived
 
 def serialize_ciphertexts(ciphertexts):
     return json.dumps(ciphertexts, sort_keys=True, separators=(",", ":"))
 
-def build_encrypted_message(sender, plaintext, peer_session_keys):
-    if not peer_session_keys:
-        raise ValueError("No session keys established")
+def build_encrypted_message(sender, plaintext, peer_shared_secrets, message_counters):
+    if not peer_shared_secrets:
+        raise ValueError("No shared secrets established")
 
     aad = sender.encode("utf-8")
-    ciphertexts = {
-        peer: encrypt(plaintext, key, aad=aad)
-        for peer, key in peer_session_keys.items()
-    }
+    ciphertexts = {}
+    counters = {}
+    for peer, shared_secret in peer_shared_secrets.items():
+        counter = message_counters[peer]
+        key = derive_message_key(shared_secret, counter)
+        ciphertexts[peer] = encrypt(plaintext, key, aad=aad)
+        counters[peer] = counter
+        message_counters[peer] += 1  # increment for next message
+
     serialized_ciphertexts = serialize_ciphertexts(ciphertexts)
     to_sign = chat_signing_bytes(sender, serialized_ciphertexts)
     return {
         "type": "chat",
         "sender": sender,
         "ciphertexts": ciphertexts,
+        "counters": counters,  # include counters used for this message
         "hash": sha256_hex(serialized_ciphertexts.encode("utf-8")),
         "signature": ed25519_sign(ed25519_private_key, to_sign),
     }
 
-def decrypt_incoming_message(message, recipient, peer_session_keys):
+def decrypt_incoming_message(message, recipient, peer_shared_secrets):
     sender = message["sender"]
-    key = peer_session_keys[sender]
+    shared_secret = peer_shared_secrets[sender]
+    counter = message["counters"][recipient]
+    key = derive_message_key(shared_secret, counter)
     ciphertext = message["ciphertexts"][recipient]
     return decrypt(ciphertext, key, aad=sender.encode("utf-8"))
 
@@ -157,9 +170,9 @@ async def send_messages(websocket, username):
             break
 
         try:
-            payload = build_encrypted_message(username, msg, session_keys)
+            payload = build_encrypted_message(username, msg, session_keys, message_counters)
         except ValueError:
-            print("⚠️ No session keys established yet. Wait for another client to complete key exchange.")
+            print("⚠️ No shared secrets established yet. Wait for another client to complete key exchange.")
             continue
 
         await websocket.send(json.dumps(payload))
@@ -203,13 +216,14 @@ async def receive_messages(websocket, username):
                     continue
 
                 peer_public_key = b64_to_public_key(data["public_key"])
-                session_key = derive_session_key(dh_private_key, peer_public_key)
-                session_keys[peer] = session_key
+                shared_secret = derive_shared_secret(dh_private_key, peer_public_key)
+                session_keys[peer] = shared_secret
+                message_counters[peer] = 0
 
                 print(f"\n[DH] Session key established with {peer}")
                 if SHOW_DEMO_OUTPUT:
-                    # Compare this hex on both clients: it should match for the same pair of users.
-                    print(f"[DH] Derived AES-256 session key with {peer} (hex): {session_key.hex()}")
+                    # Show the shared secret (not the final key, since keys are per-message now)
+                    print(f"[DH] Derived shared secret with {peer} (hex): {shared_secret.hex()}")
                 print(f"{username}: ", end="", flush=True)
                 continue
 

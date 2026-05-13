@@ -137,6 +137,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "chat",
                     "sender": username,
                     "ciphertexts": incoming["ciphertexts"],
+                    "counters": incoming.get("counters", {}),
                     "hash": incoming.get("hash"),
                     "signature": incoming.get("signature"),
                     "timestamp": get_pst_timestamp(),
