@@ -1,0 +1,43 @@
+sequenceDiagram
+    participant Alice as Client A
+    participant Server as Server
+    participant Bob as Client B
+
+    Alice->>Server: websocket connect
+    Alice->>Server: send username
+    Server-->>Alice: accept + history + existing public keys
+
+    Alice->>Server: {type: dh_public, public_key: A_pub}
+    Server->>Server: store A_pub
+    Server-->>Bob: relay dh_public A_pub (if Bob connected)
+
+    Alice->>Server: {type: ed25519_public, public_key: A_ed25519}
+    Server->>Server: store A_ed25519
+    Server-->>Bob: relay ed25519_public A_ed25519 (if Bob connected)
+
+    Bob->>Server: websocket connect
+    Bob->>Server: send username
+    Server-->>Bob: accept + history
+    Server-->>Bob: relay A_pub + A_ed25519
+
+    Bob->>Server: {type: dh_public, public_key: B_pub}
+    Server->>Server: store B_pub
+    Server-->>Alice: relay dh_public B_pub
+
+    Bob->>Server: {type: ed25519_public, public_key: B_ed25519}
+    Server->>Server: store B_ed25519
+    Server-->>Alice: relay ed25519_public B_ed25519
+
+    Alice->>Alice: derive session key K_AB from A_priv and B_pub
+    Bob->>Bob: derive session key K_BA from B_priv and A_pub
+
+    Alice->>Server: {type: chat, ciphertexts: {bob: C}, hash, signature}
+    Server-->>Bob: relay chat message
+
+    Bob->>Bob: verify hash and signature using A_ed25519
+    Bob->>Bob: decrypt C using K_BA
+    Bob-->>Bob: display plaintext
+
+    Bob->>Server: disconnect
+    Server->>Server: remove B_pub, B_ed25519
+    Server-->>Alice: notify disconnect
